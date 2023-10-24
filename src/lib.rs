@@ -8,11 +8,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyInt;
 use pyo3::wrap_pyfunction;
 use std::sync::Mutex;
+use std::f64::NAN;
 
 #[pyfunction]
-fn quadfit(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &PyInt) -> PyResult<Py<PyArray2<f64>>> {
+fn quadfit(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &PyInt, mask: &PyArray2<u8>) -> PyResult<Py<PyArray2<f64>>> {
     let nrj = unsafe { energy.as_array() };
     let stack = unsafe { image.as_array() };
+    let mask = unsafe { mask.as_array() };
     let num_points = points.extract::<usize>()?;
 
     let shape = stack.shape();
@@ -56,8 +58,11 @@ fn quadfit(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &P
             let initial_guess = vec![a, b, c];
             let xdata = nrj.slice(s![start_idx..end_idx]).to_vec();
             let ydata = slice.slice(s![start_idx..end_idx]).to_vec();
-            result[[i, j]] = quadratic_fit_center(xdata, ydata, initial_guess);
-
+            if mask[[i, j]] > 0 {
+                result[[i, j]] = quadratic_fit_center(xdata, ydata, initial_guess);
+            } else {
+                result[[i, j]] = NAN;
+            }
         }
     }
     let py_result = PyArray2::from_array(py, &result);
@@ -121,14 +126,13 @@ fn quadfit_mc(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points:
 }
 
 #[pyfunction]
-fn gaussianfit(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &PyInt) -> PyResult<Py<PyArray2<f64>>> {
+fn gaussianfit(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &PyInt, mask: &PyArray2<u8>) -> PyResult<Py<PyArray2<f64>>> {
     let nrj = unsafe { energy.as_array() };
     let (nrjmin, nrjmax) = nrj.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &val| {
         (min.min(val), max.max(val))
     });
-
-    println!("nrjmin: {}, nrjmax: {}", nrjmin, nrjmax);
     let stack = unsafe { image.as_array() };
+    let mask = unsafe { mask.as_array() };
     let num_points = points.extract::<usize>()?;
 
     let shape = stack.shape();
@@ -176,7 +180,12 @@ fn gaussianfit(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points
             let xdata = nrj.slice(s![start_idx..end_idx]).to_vec();
             let ydata = slice.slice(s![start_idx..end_idx]).to_vec();
 
-            result[[i, j]] = gaussian_fit_center(xdata, ydata, initial_guess);
+            if mask[[i, j]] > 0 {
+                result[[i, j]] = gaussian_fit_center(xdata, ydata, initial_guess);
+            } else {
+                result[[i, j]] = NAN;
+            }
+
 
         }
     }

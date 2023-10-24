@@ -70,10 +70,11 @@ fn quadfit(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &P
 }
 
 #[pyfunction]
-fn quadfit_mc(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &PyInt) -> PyResult<Py<PyArray2<f64>>> {
+fn quadfit_mc(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points: &PyInt, mask: &PyArray2<u8>) -> PyResult<Py<PyArray2<f64>>> {
     let nrj = unsafe { energy.as_array() };
     let stack = unsafe { image.as_array() };
     let num_points = points.extract::<usize>()?;
+    let mask = unsafe { mask.as_array() };
 
     let shape = stack.shape();
     let mut result = Mutex::new(Array::zeros((shape[1], shape[2])));
@@ -117,8 +118,11 @@ fn quadfit_mc(py: Python, energy: &PyArray1<f64>, image: &PyArray3<f64>, points:
             let xdata = nrj.slice(s![start_idx..end_idx]).to_vec();
             let ydata = slice.slice(s![start_idx..end_idx]).to_vec();
             let mut guarded_result = result.lock().unwrap();
-            guarded_result[[i, j]] = quadratic_fit_center(xdata, ydata, initial_guess);
-
+            if mask[[i, j]] > 0 {
+                guarded_result[[i, j]] = quadratic_fit_center(xdata, ydata, initial_guess);
+            } else {
+                guarded_result[[i, j]] = NAN;
+            }
         }
     });
     let py_result = PyArray2::from_array(py, &*result.lock().unwrap());

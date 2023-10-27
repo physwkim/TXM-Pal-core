@@ -1,6 +1,6 @@
 use median::Filter;
 
-fn medfilt(arr: Vec<f64>, window_size: usize, edge_mode: &str) -> Vec<f64> {
+pub fn medfilt(arr: Vec<f64>, window_size: usize, edge_mode: &str) -> Vec<f64> {
     let radius = window_size / 2;
     let mut filtered: Vec<f64> = vec![0.0; arr.len()];
     let mut filter = Filter::new(window_size);
@@ -9,7 +9,7 @@ fn medfilt(arr: Vec<f64>, window_size: usize, edge_mode: &str) -> Vec<f64> {
         // left edge handling
         if i == 0 {
             // insert arr[0] into filter when (i-radius) < 0
-            for j in 0..radius {
+            for _ in 0..radius {
                 if edge_mode == "extension" {
                     filter.consume(arr[0]);
                 } else if edge_mode == "zeropadding" {

@@ -1,7 +1,7 @@
 use ndarray::{s, Array};
 use rayon::prelude::*;
 mod fit;
-use fit::{gaussian_fit_center, quadratic_fit_center};
+use fit::{gaussian_fit_center, quadratic_fit_center, quadratic_fit};
 
 use numpy::{PyArray1, PyArray2, PyArray3};
 use pyo3::prelude::*;
@@ -12,7 +12,7 @@ use std::f64::NAN;
 // use whittaker_smoother::whittaker_smoother;
 use savgol_rs::{savgol_filter, SavGolInput};
 mod filter;
-use filter::medfilt;
+use filter::{medfilt, multi_3point_average};
 
 #[pyfunction]
 fn quadfit_mc(
@@ -66,8 +66,9 @@ fn quadfit_mc(
                             slice = savgol_filter(&input).unwrap();
                         } else if algorithm == "median" {
                             slice = medfilt(slice, smooth_width, "zeropadding");
+                        } else if algorithm == "3point" {
+                            slice = multi_3point_average(&slice, smooth_width);
                         }
-
                     }
 
                     let sub_slice = &slice[start_idx..stop_idx];
@@ -118,8 +119,8 @@ fn quadfit_mc(
                     }
                 }
                 local_result
-        })
-        .collect()
+            })
+            .collect()
     });
 
     let final_result = result
@@ -127,6 +128,18 @@ fn quadfit_mc(
         .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr);
     let py_result = PyArray2::from_array(py, &final_result);
     Ok(py_result.to_owned())
+}
+
+#[pyfunction]
+fn quadfit_single(_py:Python, xdata: &PyArray1<f64>, ydata: &PyArray1<f64>, initial_guess: &PyArray1<f64>) -> PyResult<f64> {
+    let xdata = unsafe { xdata.as_array() };
+    let ydata = unsafe { ydata.as_array() };
+    let initial_guess = unsafe { initial_guess.as_array() };
+
+    let result = quadratic_fit(xdata.to_vec(), ydata.to_vec(), initial_guess.to_vec());
+    println!("{:?}", result);
+    Ok(result[1])
+
 }
 
 #[pyfunction]
@@ -185,8 +198,9 @@ fn gaussianfit_mc(
                             slice = savgol_filter(&input).unwrap();
                         } else if algorithm == "medfilt" {
                             slice = medfilt(slice, smooth_width, "zeropadding");
+                        } else if algorithm == "3point" {
+                            slice = multi_3point_average(&slice, smooth_width);
                         }
-
                     }
                     let sub_slice = &slice[start_idx..stop_idx];
                     let (relative_max_idx, _) = &sub_slice
@@ -241,8 +255,8 @@ fn gaussianfit_mc(
                     }
                 }
                 local_result
-        })
-        .collect()
+            })
+            .collect()
     });
 
     let final_result = result
@@ -256,5 +270,6 @@ fn gaussianfit_mc(
 fn lmfitrs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadfit_mc, m)?)?;
     m.add_function(wrap_pyfunction!(gaussianfit_mc, m)?)?;
+    m.add_function(wrap_pyfunction!(quadfit_single, m)?)?;
     Ok(())
 }

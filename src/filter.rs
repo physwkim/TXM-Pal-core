@@ -57,3 +57,17 @@ pub fn multi_3point_average(arr: &Vec<f64>, iteration: usize) -> Vec<f64> {
     }
     filtered
 }
+
+pub fn boxcar(arr: &Vec<f64>, kernel_size: usize) -> Vec<f64> {
+    // Do boxcar filter
+    let kernel_weight: f64 = 1.0 / kernel_size as f64;
+    let mut filtered: Vec<f64> = arr.clone();
+    let half_kernel: usize = kernel_size / 2;
+
+    for i in 0..filtered.len() {
+        let start = if i >= half_kernel { i - half_kernel } else { 0 };
+        let end = usize::min(i + half_kernel + 1, filtered.len());
+        filtered[i] = arr[start..end].iter().sum::<f64>() * kernel_weight;
+    }
+    filtered
+}

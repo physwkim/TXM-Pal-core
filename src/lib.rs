@@ -1,5 +1,5 @@
 use ndarray::{s, Array};
-use rayon::prelude::*;
+use rayon::{prelude::*};
 mod fit;
 use fit::{gaussian_fit_center, quadratic_fit_center, quadratic_fit};
 
@@ -12,7 +12,7 @@ use std::f64::NAN;
 // use whittaker_smoother::whittaker_smoother;
 use savgol_rs::{savgol_filter, SavGolInput};
 mod filter;
-use filter::{medfilt, multi_3point_average};
+use filter::{medfilt, multi_3point_average, boxcar};
 
 #[pyfunction]
 fn quadfit_mc(
@@ -46,8 +46,8 @@ fn quadfit_mc(
 
     let shape = stack.shape();
 
-    let result: Vec<_> = py.allow_threads(|| {
-        (0..shape[1])
+    let final_result = py.allow_threads(|| {
+        let result: Vec<_> = (0..shape[1])
             .into_par_iter()
             .map(|i| {
                 let mut local_result = Array::zeros((shape[1], shape[2]));
@@ -68,6 +68,8 @@ fn quadfit_mc(
                             slice = medfilt(slice, smooth_width, "zeropadding");
                         } else if algorithm == "3point" {
                             slice = multi_3point_average(&slice, smooth_width);
+                        } else if algorithm == "boxcar" {
+                            slice = boxcar(&slice, smooth_width);
                         }
                     }
 
@@ -120,12 +122,12 @@ fn quadfit_mc(
                 }
                 local_result
             })
-            .collect()
+            .collect();
+
+            result.iter()
+                  .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr)
     });
 
-    let final_result = result
-        .iter()
-        .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr);
     let py_result = PyArray2::from_array(py, &final_result);
     Ok(py_result.to_owned())
 }
@@ -178,8 +180,8 @@ fn gaussianfit_mc(
 
     let shape = stack.shape();
 
-    let result: Vec<_> = py.allow_threads(|| {
-        (0..shape[1])
+    let final_result = py.allow_threads(|| {
+        let result: Vec<_> = (0..shape[1])
             .into_par_iter()
             .map(|i| {
                 let mut local_result = Array::zeros((shape[1], shape[2]));
@@ -200,6 +202,8 @@ fn gaussianfit_mc(
                             slice = medfilt(slice, smooth_width, "zeropadding");
                         } else if algorithm == "3point" {
                             slice = multi_3point_average(&slice, smooth_width);
+                        } else if algorithm == "boxcar" {
+                            slice = boxcar(&slice, smooth_width);
                         }
                     }
                     let sub_slice = &slice[start_idx..stop_idx];
@@ -256,12 +260,12 @@ fn gaussianfit_mc(
                 }
                 local_result
             })
-            .collect()
+            .collect();
+
+        result.iter()
+              .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr)
     });
 
-    let final_result = result
-        .iter()
-        .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr);
     let py_result = PyArray2::from_array(py, &final_result);
     Ok(py_result.to_owned())
 }

@@ -1,18 +1,24 @@
-use ndarray::{s, Array};
-use rayon::{prelude::*};
-mod fit;
-use fit::{gaussian_fit_center, quadratic_fit_center, quadratic_fit};
+use ndarray::prelude::*;
+use rayon::prelude::*;
 
 use numpy::{PyArray1, PyArray2, PyArray3};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
 use pyo3::wrap_pyfunction;
+
 use std::f64::NAN;
 
 // use whittaker_smoother::whittaker_smoother;
 use savgol_rs::{savgol_filter, SavGolInput};
+
 mod filter;
 use filter::{medfilt, multi_3point_average, boxcar};
+
+mod fit;
+use fit::{gaussian_fit_center, quadratic_fit_center, quadratic_fit};
+
+mod phase_cross_correlation;
+use phase_cross_correlation::phase_cross_correlation;
 
 #[pyfunction]
 fn quadfit_mc(
@@ -270,10 +276,52 @@ fn gaussianfit_mc(
     Ok(py_result.to_owned())
 }
 
+#[pyfunction]
+fn phase_cross_correlation_rs(
+    py: Python,
+    reference_image: &PyArray2<f64>,
+    moving_image: &PyArray2<f64>,
+    upsample_factor: &PyInt,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let reference_image = unsafe { reference_image.as_array() }.to_owned();
+    let moving_image = unsafe { moving_image.as_array() }.to_owned();
+    let upsample_factor = upsample_factor.extract::<usize>().unwrap();
+    let shift_vals = phase_cross_correlation(&reference_image, &moving_image, upsample_factor);
+    let shift_vals = array![shift_vals.0, shift_vals.1];
+    let shift_vals_py = PyArray1::from_vec(py, shift_vals.to_vec());
+
+    Ok(shift_vals_py.into())
+}
+
+#[pyfunction]
+fn phase_cross_correlation_stack(
+    py: Python,
+    stack: &PyArray3<f64>,
+    ref_index: &PyInt,
+    upsample_factor: &PyInt,
+) -> PyResult<Py<PyArray2<f64>>> {
+    let stack = unsafe { stack.as_array() };
+    let ref_index = ref_index.extract::<usize>()?;
+    let upsample_factor = upsample_factor.extract::<usize>()?;
+
+    let reference_image: Array2<f64> = stack.slice(s![ref_index, .., ..]).to_owned();
+
+    let shifts: Vec<_> = (0..stack.shape()[0]).into_par_iter().map(|i| {
+        let moving_image: Array2<f64> = stack.slice(s![i, .., ..]).to_owned();
+        phase_cross_correlation(&reference_image, &moving_image, upsample_factor)
+    }).collect();
+
+    let shifts_vec: Vec<Vec<f64>> = shifts.into_iter().map(|(x, y)| vec![x, y]).collect();
+    let shifts_list = PyArray2::from_vec2(py, &shifts_vec)?;
+    Ok(shifts_list.to_owned())
+}
+
 #[pymodule]
 fn lmfitrs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadfit_mc, m)?)?;
     m.add_function(wrap_pyfunction!(gaussianfit_mc, m)?)?;
     m.add_function(wrap_pyfunction!(quadfit_single, m)?)?;
+    m.add_function(wrap_pyfunction!(phase_cross_correlation_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(phase_cross_correlation_stack, m)?)?;
     Ok(())
 }

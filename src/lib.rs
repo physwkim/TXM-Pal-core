@@ -20,6 +20,9 @@ use fit::{gaussian_fit_center, quadratic_fit_center, quadratic_fit};
 mod phase_cross_correlation;
 use phase_cross_correlation::phase_cross_correlation;
 
+use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
+use std::sync::{Arc, Mutex};
+
 #[pyfunction]
 fn quadfit_mc(
     py: Python,
@@ -316,6 +319,45 @@ fn phase_cross_correlation_stack(
     Ok(shifts_list.to_owned())
 }
 
+#[pyfunction]
+fn renormalize_absorbance_stack(
+    py: Python,
+    energy: &PyArray1<f64>,
+    image: &PyArray3<f64>,
+    energy_offset_scale: &PyFloat,
+) -> PyResult<Py<PyArray3<f64>>> {
+    let nrj = unsafe { energy.as_array() };
+    let offset_scale = energy_offset_scale.value();
+    let stack = unsafe { image.as_array() };
+
+    let shape = stack.shape();
+    let stack_normalized = Arc::new(Mutex::new(Array3::<f64>::zeros((shape[0], shape[1], shape[2]))));
+
+    (0..shape[1]).into_par_iter().map(|i| {
+        let mut local_results = Vec::new();
+        for j in 0..shape[2] {
+            let off_energy = nrj.mapv(|x| x - i as f64 * offset_scale);
+            let interpolator = Interp1DBuilder::new(stack.slice(s![.., i, j]))
+                .x(off_energy.clone())
+                .strategy(Linear::new().extrapolate(true))
+                .build().unwrap();
+
+            let result: Vec<f64> = interpolator.interp_array(&nrj).unwrap().to_vec();
+            local_results.push((j, result));
+        }
+        (i, local_results)
+    }).collect::<Vec<_>>().into_iter().for_each(|(i, local_results)| {
+        let mut stack_normalized_guard = stack_normalized.lock().unwrap();
+        for (j, result) in local_results {
+            stack_normalized_guard.slice_mut(s![.., i, j]).assign(&Array::from(result));
+        }
+    });
+
+    let stack_normalized_array = stack_normalized.lock().unwrap();
+    let py_result = PyArray3::from_array(py, &stack_normalized_array);
+    Ok(py_result.to_owned())
+}
+
 #[pymodule]
 fn lmfitrs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadfit_mc, m)?)?;
@@ -323,5 +365,6 @@ fn lmfitrs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadfit_single, m)?)?;
     m.add_function(wrap_pyfunction!(phase_cross_correlation_rs, m)?)?;
     m.add_function(wrap_pyfunction!(phase_cross_correlation_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(renormalize_absorbance_stack, m)?)?;
     Ok(())
 }

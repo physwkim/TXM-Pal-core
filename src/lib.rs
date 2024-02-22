@@ -12,15 +12,16 @@ use std::f64::NAN;
 use savgol_rs::{savgol_filter, SavGolInput};
 
 mod filter;
-use filter::{medfilt, multi_3point_average, boxcar};
+use filter::{boxcar, medfilt, multi_3point_average};
 
 mod fit;
-use fit::{gaussian_fit_center, quadratic_fit_center, quadratic_fit};
+use fit::{gaussian_fit_center, quadratic_fit, quadratic_fit_center};
 
 mod phase_cross_correlation;
 use phase_cross_correlation::phase_cross_correlation;
 
 use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
+use std::cmp::{max, min};
 use std::sync::{Arc, Mutex};
 
 #[pyfunction]
@@ -133,8 +134,9 @@ fn quadfit_mc(
             })
             .collect();
 
-            result.iter()
-                  .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr)
+        result
+            .iter()
+            .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr)
     });
 
     let py_result = PyArray2::from_array(py, &final_result);
@@ -142,7 +144,12 @@ fn quadfit_mc(
 }
 
 #[pyfunction]
-fn quadfit_single(_py:Python, xdata: &PyArray1<f64>, ydata: &PyArray1<f64>, initial_guess: &PyArray1<f64>) -> PyResult<f64> {
+fn quadfit_single(
+    _py: Python,
+    xdata: &PyArray1<f64>,
+    ydata: &PyArray1<f64>,
+    initial_guess: &PyArray1<f64>,
+) -> PyResult<f64> {
     let xdata = unsafe { xdata.as_array() };
     let ydata = unsafe { ydata.as_array() };
     let initial_guess = unsafe { initial_guess.as_array() };
@@ -150,7 +157,6 @@ fn quadfit_single(_py:Python, xdata: &PyArray1<f64>, ydata: &PyArray1<f64>, init
     let result = quadratic_fit(xdata.to_vec(), ydata.to_vec(), initial_guess.to_vec());
     println!("{:?}", result);
     Ok(result[1])
-
 }
 
 #[pyfunction]
@@ -271,8 +277,9 @@ fn gaussianfit_mc(
             })
             .collect();
 
-        result.iter()
-              .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr)
+        result
+            .iter()
+            .fold(Array::zeros((shape[1], shape[2])), |acc, arr| acc + arr)
     });
 
     let py_result = PyArray2::from_array(py, &final_result);
@@ -309,10 +316,15 @@ fn phase_cross_correlation_stack(
 
     let reference_image: Array2<f64> = stack.slice(s![ref_index, .., ..]).to_owned();
 
-    let shifts: Vec<_> = (0..stack.shape()[0]).into_par_iter().map(|i| {
-        let moving_image: Array2<f64> = stack.slice(s![i, .., ..]).to_owned();
-        phase_cross_correlation(&reference_image, &moving_image, upsample_factor)
-    }).collect();
+    let shifts: Vec<_> = py.allow_threads(|| {
+        (0..stack.shape()[0])
+            .into_par_iter()
+            .map(|i| {
+                let moving_image: Array2<f64> = stack.slice(s![i, .., ..]).to_owned();
+                phase_cross_correlation(&reference_image, &moving_image, upsample_factor)
+            })
+            .collect()
+    });
 
     let shifts_vec: Vec<Vec<f64>> = shifts.into_iter().map(|(x, y)| vec![x, y]).collect();
     let shifts_list = PyArray2::from_vec2(py, &shifts_vec)?;
@@ -331,26 +343,38 @@ fn renormalize_absorbance_stack(
     let stack = unsafe { image.as_array() };
 
     let shape = stack.shape();
-    let stack_normalized = Arc::new(Mutex::new(Array3::<f64>::zeros((shape[0], shape[1], shape[2]))));
+    let stack_normalized = Arc::new(Mutex::new(Array3::<f64>::zeros((
+        shape[0], shape[1], shape[2],
+    ))));
 
-    (0..shape[1]).into_par_iter().map(|i| {
-        let mut local_results = Vec::new();
-        for j in 0..shape[2] {
-            let off_energy = nrj.mapv(|x| x - i as f64 * offset_scale);
-            let interpolator = Interp1DBuilder::new(stack.slice(s![.., i, j]))
-                .x(off_energy.clone())
-                .strategy(Linear::new().extrapolate(true))
-                .build().unwrap();
+    py.allow_threads(|| {
+        (0..shape[1])
+            .into_par_iter()
+            .map(|i| {
+                let mut local_results = Vec::new();
+                for j in 0..shape[2] {
+                    let off_energy = nrj.mapv(|x| x - i as f64 * offset_scale);
+                    let interpolator = Interp1DBuilder::new(stack.slice(s![.., i, j]))
+                        .x(off_energy.clone())
+                        .strategy(Linear::new().extrapolate(true))
+                        .build()
+                        .unwrap();
 
-            let result: Vec<f64> = interpolator.interp_array(&nrj).unwrap().to_vec();
-            local_results.push((j, result));
-        }
-        (i, local_results)
-    }).collect::<Vec<_>>().into_iter().for_each(|(i, local_results)| {
-        let mut stack_normalized_guard = stack_normalized.lock().unwrap();
-        for (j, result) in local_results {
-            stack_normalized_guard.slice_mut(s![.., i, j]).assign(&Array::from(result));
-        }
+                    let result: Vec<f64> = interpolator.interp_array(&nrj).unwrap().to_vec();
+                    local_results.push((j, result));
+                }
+                (i, local_results)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .for_each(|(i, local_results)| {
+                let mut stack_normalized_guard = stack_normalized.lock().unwrap();
+                for (j, result) in local_results {
+                    stack_normalized_guard
+                        .slice_mut(s![.., i, j])
+                        .assign(&Array::from(result));
+                }
+            });
     });
 
     let stack_normalized_array = stack_normalized.lock().unwrap();

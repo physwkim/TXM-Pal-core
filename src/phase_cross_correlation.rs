@@ -265,4 +265,3 @@ pub fn phase_cross_correlation(
     // Return result
     shift
 }
-

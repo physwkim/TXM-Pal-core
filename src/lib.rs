@@ -21,7 +21,6 @@ mod phase_cross_correlation;
 use phase_cross_correlation::phase_cross_correlation;
 
 use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
-use std::cmp::{max, min};
 use std::sync::{Arc, Mutex};
 
 #[pyfunction]

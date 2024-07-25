@@ -10,4 +10,4 @@
     maturin develop -r
 
 6) If the build fails, try running the following commands
-    cargo update -p maturin --precise 1.3.0
+   cargo update -p maturin --precise 1.3.0

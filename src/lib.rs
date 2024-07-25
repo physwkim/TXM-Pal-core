@@ -382,7 +382,7 @@ fn renormalize_absorbance_stack(
 }
 
 #[pymodule]
-fn lmfitrs(_py: Python, m: &PyModule) -> PyResult<()> {
+fn txm_pal_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadfit_mc, m)?)?;
     m.add_function(wrap_pyfunction!(gaussianfit_mc, m)?)?;
     m.add_function(wrap_pyfunction!(quadfit_single, m)?)?;

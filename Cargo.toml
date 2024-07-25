@@ -1,5 +1,5 @@
 [package]
-name = "lmfitrs"
+name = "txm_pal_core"
 version = "0.1.6"
 edition = "2021"
 

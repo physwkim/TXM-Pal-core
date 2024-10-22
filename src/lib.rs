@@ -262,7 +262,7 @@ fn gaussianfit_mc(
                         end_idx = slice.len() - 1;
                     }
 
-                    let initial_guess = vec![amp, cen, sig];
+                    let initial_guess = vec![amp, cen, sig, miny];
                     let xdata = nrj.slice(s![start_idx..end_idx]).to_vec();
                     let ydata = slice.slice(s![start_idx..end_idx]).to_vec();
 
@@ -381,6 +381,132 @@ fn renormalize_absorbance_stack(
     Ok(py_result.to_owned())
 }
 
+fn gradient(data: &Vec<f64>) -> Vec<f64> {
+    let n = data.len();
+    let mut grad = Vec::with_capacity(n);
+
+    if n < 2 {
+        return vec![]; // 데이터가 너무 적으면 빈 벡터 반환
+    }
+
+    // 첫 번째 요소: forward difference (전진 차분)
+    grad.push(data[1] - data[0]);
+
+    // 중간 요소들: central difference (중앙 차분)
+    for i in 1..n - 1 {
+        let diff = (data[i + 1] - data[i - 1]) / 2.0;
+        grad.push(diff);
+    }
+
+    // 마지막 요소: backward difference (후진 차분)
+    grad.push(data[n - 1] - data[n - 2]);
+
+    grad
+}
+
+#[pyfunction]
+fn process_images(_py: Python, subdata: &PyArray3<f64>) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    let subdata = unsafe { subdata.as_array() };
+    let shape = subdata.shape();
+    let mut centers = Vec::with_capacity(shape[0]);
+    let mut yshifts = Vec::with_capacity(shape[0]);
+    let mut center_shift = Vec::with_capacity(shape[0]);
+    let mut y_shift = Vec::with_capacity(shape[0]);
+
+    for i in 0..shape[0] {
+        // x-axis sum for gaussian fitting
+        let ydata = subdata.index_axis(Axis(0), i).sum_axis(Axis(0)).to_vec();
+        let xdata: Vec<f64> = (0..ydata.len()).map(|x| x as f64).collect();
+
+        let max_idx = ydata
+            .iter()
+            .cloned()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap()
+            .0;
+
+        let min_idx = ydata
+            .iter()
+            .cloned()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap()
+            .0;
+
+        // initial_guessing (a*exp(-(x-b)^2/(2*c^2))
+        let maxy = ydata[max_idx];
+        let miny = ydata[min_idx];
+        let cen = max_idx as f64;
+        let height = (maxy - miny) * 3.0;
+        let sig = (ydata.len() as f64) / 6.0;
+        let amp = height * sig;
+
+        let initial_guess = vec![amp, cen, sig, miny];
+
+        // gaussian fitting
+        let center = gaussian_fit_center(xdata, ydata, initial_guess);
+        centers.push(center);
+
+        // Y-axis line profile extraction and 3-point smoothing
+        let center_idx = center.floor() as usize;
+
+        // 인덱스 범위 조정
+        let max_center_idx = subdata.shape()[2] - 2; // 배열의 최대 인덱스를 벗어나지 않도록 설정
+        let center_idx = if center_idx < 1 {
+            1
+        } else if center_idx > max_center_idx {
+            max_center_idx
+        } else {
+            center_idx
+        };
+
+        let start_idx = center_idx - 1;
+        let end_idx = center_idx + 2; // 이미 max_center_idx로 제한했으므로 안전
+        let profile = subdata.slice(s![i, .., start_idx..end_idx]).sum_axis(Axis(1)).to_vec();
+
+        // Apply three point average
+        let smoothed = multi_3point_average(&profile, 1);
+        let profile_gradient: Vec<f64> = gradient(&smoothed).iter().map(|w| w.abs()).collect();
+        let xdata: Vec<f64> = (0..profile_gradient.len()).map(|x| x as f64).collect();
+
+        // Gaussian fitting for Y shift
+        // Initial guessing
+        let max_idx = profile_gradient
+            .iter()
+            .cloned()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap()
+            .0;
+
+        let min_idx = profile_gradient
+            .iter()
+            .cloned()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap()
+            .0;
+
+        let maxy = profile_gradient[max_idx];
+        let miny = profile_gradient[min_idx];
+        let cen = max_idx as f64;
+        let height = (maxy - miny) * 3.0;
+        let sig = (profile_gradient.len() as f64) / 6.0;
+        let amp = height * sig;
+
+        let initial_guess = vec![amp, cen, sig, miny];
+
+        let yshift_fitted = gaussian_fit_center(xdata, profile_gradient, initial_guess);
+        yshifts.push(yshift_fitted);
+
+        center_shift = centers.iter().map(|&x| -1.0*(x-centers[0])).collect();
+        y_shift = yshifts.iter().map(|&x| -1.0*(x-yshifts[0])).collect();
+    }
+    Ok((y_shift, center_shift))
+}
+
+
 #[pymodule]
 fn txm_pal_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadfit_mc, m)?)?;
@@ -389,5 +515,6 @@ fn txm_pal_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(phase_cross_correlation_rs, m)?)?;
     m.add_function(wrap_pyfunction!(phase_cross_correlation_stack, m)?)?;
     m.add_function(wrap_pyfunction!(renormalize_absorbance_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(process_images, m)?)?;
     Ok(())
 }

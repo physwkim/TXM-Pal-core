@@ -1,5 +1,5 @@
 use levenberg_marquardt::{LeastSquaresProblem, LevenbergMarquardt};
-use nalgebra::{DVector, Dyn, Matrix, OVector, Owned, Vector, Vector3, U3};
+use nalgebra::{DVector, Dyn, Matrix, OVector, Owned, Vector, Vector3, Vector4, U3, U4};
 
 struct Quadratic {
     // ax^2 + bx + c
@@ -76,8 +76,8 @@ pub fn quadratic_fit_center(x: Vec<f64>, y: Vec<f64>, initial_guess: Vec<f64>) -
 }
 
 struct Gaussian {
-    // a * exp(-(x-b)^2/(2*c^2)
-    params: OVector<f64, U3>,
+    // a * exp(-(x-b)^2/(2*c^2) + d
+    params: OVector<f64, U4>,
     x: Vec<f64>,
     y: Vec<f64>,
 }
@@ -86,23 +86,23 @@ impl Gaussian {
     pub fn new(x: Vec<f64>, y: Vec<f64>) -> Self {
         assert_eq!(x.len(), y.len());
         Gaussian {
-            params: Vector3::<f64>::zeros(),
+            params: Vector4::<f64>::zeros(),
             x,
             y,
         }
     }
 }
 
-impl LeastSquaresProblem<f64, Dyn, U3> for Gaussian {
-    type ParameterStorage = Owned<f64, U3>;
+impl LeastSquaresProblem<f64, Dyn, U4> for Gaussian {
+    type ParameterStorage = Owned<f64, U4>;
     type ResidualStorage = Owned<f64, Dyn>;
-    type JacobianStorage = Owned<f64, Dyn, U3>;
+    type JacobianStorage = Owned<f64, Dyn, U4>;
 
-    fn set_params(&mut self, params: &Vector<f64, U3, Self::ParameterStorage>) {
+    fn set_params(&mut self, params: &Vector<f64, U4, Self::ParameterStorage>) {
         self.params = *params;
     }
 
-    fn params(&self) -> Vector<f64, U3, Self::ParameterStorage> {
+    fn params(&self) -> Vector<f64, U4, Self::ParameterStorage> {
         self.params
     }
 
@@ -113,14 +113,14 @@ impl LeastSquaresProblem<f64, Dyn, U3> for Gaussian {
             .enumerate()
             .map(|(i, &x)| {
                 let temp =
-                    self.params[0] * (-0.5 * ((x - self.params[1]) / self.params[2]).powi(2)).exp();
+                    self.params[0] * (-0.5 * ((x - self.params[1]) / self.params[2]).powi(2)).exp() + self.params[3];
                 temp - self.y[i]
             })
             .collect::<Vec<_>>();
         Some(DVector::from_vec(residuals))
     }
 
-    fn jacobian(&self) -> Option<Matrix<f64, Dyn, U3, Self::JacobianStorage>> {
+    fn jacobian(&self) -> Option<Matrix<f64, Dyn, U4, Self::JacobianStorage>> {
         let a = self.params[0];
         let b = self.params[1];
         let c = self.params[2];
@@ -133,18 +133,19 @@ impl LeastSquaresProblem<f64, Dyn, U3> for Gaussian {
                     (-0.5 * ((x - b) / c).powi(2)).exp(),
                     a / c.powi(2) * (x - b) * (-0.5 * ((x - b) / c).powi(2)).exp(),
                     a * (x - b).powi(2) / c.powi(3) * (-0.5 * ((x - b) / c).powi(2)).exp(),
+                    1.0
                 ]
             })
             .collect::<Vec<_>>();
 
-        Some(Matrix::<f64, Dyn, U3, Self::JacobianStorage>::from_row_slice(&jac.concat()))
+        Some(Matrix::<f64, Dyn, U4, Self::JacobianStorage>::from_row_slice(&jac.concat()))
     }
 }
 
 #[allow(dead_code)]
-pub fn gaussian_fit(x: Vec<f64>, y: Vec<f64>, initial_guess: Vec<f64>) -> Vector3<f64> {
+pub fn gaussian_fit(x: Vec<f64>, y: Vec<f64>, initial_guess: Vec<f64>) -> Vector4<f64> {
     let mut problem = Gaussian::new(x, y);
-    let initial_guess = Vector3::from_vec(initial_guess);
+    let initial_guess = Vector4::from_vec(initial_guess);
     problem.set_params(&initial_guess);
     // let (problem, _) = LevenbergMarquardt::new().with_tol(1.49012e-08).minimize(problem);
     let (problem, _) = LevenbergMarquardt::new().minimize(problem);
@@ -153,7 +154,7 @@ pub fn gaussian_fit(x: Vec<f64>, y: Vec<f64>, initial_guess: Vec<f64>) -> Vector
 
 pub fn gaussian_fit_center(x: Vec<f64>, y: Vec<f64>, initial_guess: Vec<f64>) -> f64 {
     let mut problem = Gaussian::new(x, y);
-    let initial_guess = Vector3::from_vec(initial_guess);
+    let initial_guess = Vector4::from_vec(initial_guess);
     problem.set_params(&initial_guess);
     // let (problem, _) = LevenbergMarquardt::new().with_tol(1.49012e-08).minimize(problem);
     let (problem, _) = LevenbergMarquardt::new().minimize(problem);

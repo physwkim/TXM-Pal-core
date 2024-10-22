@@ -44,14 +44,8 @@ pub fn multi_3point_average(arr: &Vec<f64>, iteration: usize) -> Vec<f64> {
     let mut buffer: Vec<f64> = arr.clone();
 
     for _ in 0..iteration {
-        for i in 0..filtered.len() {
-            if i == 0 {
-                filtered[i] = one_third * (buffer[i] + buffer[i + 1]);
-            } else if i == arr.len() - 1 {
-                filtered[i] = one_third * (buffer[i - 1] + buffer[i]);
-            } else {
-                filtered[i] = one_third * (buffer[i - 1] + buffer[i] + buffer[i + 1]);
-            }
+        for i in 1..filtered.len()-1 {
+            filtered[i] = one_third * (buffer[i - 1] + buffer[i] + buffer[i + 1]);
         }
         buffer = filtered.clone();
     }

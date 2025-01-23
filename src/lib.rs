@@ -3,7 +3,7 @@ use rayon::prelude::*;
 
 use numpy::{PyArray1, PyArray2, PyArray3};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyDict};
 use pyo3::wrap_pyfunction;
 
 use std::f64::NAN;
@@ -19,6 +19,9 @@ use fit::{gaussian_fit_center, quadratic_fit, quadratic_fit_center};
 
 mod phase_cross_correlation;
 use phase_cross_correlation::phase_cross_correlation;
+
+mod roi;
+use roi::create_mask;
 
 use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
 use std::sync::{Arc, Mutex};
@@ -506,6 +509,16 @@ fn process_images(_py: Python, subdata: &PyArray3<f64>) -> PyResult<(Vec<f64>, V
     Ok((y_shift, center_shift))
 }
 
+#[pyfunction]
+fn create_mask_rs(py: Python, image_width: usize, image_height: usize, rois: Vec<&PyDict>) -> PyResult<Py<PyArray2<u8>>> {
+    match create_mask(image_width, image_height, rois) {
+        Ok(mask) => {
+            let py_result = PyArray2::from_array(py, &mask);
+            Ok(py_result.to_owned())
+        }
+        Err(e) => Err(e),
+    }
+}
 
 #[pymodule]
 fn txm_pal_core(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -516,5 +529,6 @@ fn txm_pal_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(phase_cross_correlation_stack, m)?)?;
     m.add_function(wrap_pyfunction!(renormalize_absorbance_stack, m)?)?;
     m.add_function(wrap_pyfunction!(process_images, m)?)?;
+    m.add_function(wrap_pyfunction!(create_mask_rs, m)?)?;
     Ok(())
 }

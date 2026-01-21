@@ -1,7 +1,7 @@
 use ndarray::prelude::*;
 use rayon::prelude::*;
 
-use numpy::{PyArray1, PyArray2, PyArray3};
+use numpy::{PyArray1, PyArray2, PyArray3, PyArray4};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyDict};
 use pyo3::wrap_pyfunction;
@@ -142,6 +142,265 @@ fn quadfit_mc(
     });
 
     let py_result = PyArray2::from_array(py, &final_result);
+    Ok(py_result.to_owned())
+}
+
+#[pyfunction]
+fn quadfit_mc_3d(
+    py: Python,
+    energy: &PyArray1<f64>,
+    volume: &PyArray4<f64>,  // (energy, z, y, x)
+    points: &PyInt,
+    mask: &PyArray3<u8>,     // (z, y, x)
+    start_e: &PyFloat,
+    stop_e: &PyFloat,
+    smooth: &PyBool,
+    algo: &PyString,
+    smooth_width: &PyInt,
+    smooth_order: &PyInt,
+) -> PyResult<Py<PyArray3<f64>>> {
+    let nrj = unsafe { energy.as_array() };
+    let start_e = start_e.value();
+    let stop_e = stop_e.value();
+
+    let smooth_width: usize = smooth_width.extract::<usize>()?;
+    let smooth_order: usize = smooth_order.extract::<usize>()?;
+
+    let start_idx = nrj.iter().position(|&x| x >= start_e).unwrap();
+    let stop_idx = nrj.iter().position(|&x| x >= stop_e).unwrap();
+
+    let stack = unsafe { volume.as_array() };
+    let num_points = points.extract::<usize>()?;
+    let mask = unsafe { mask.as_array() };
+    let smooth = smooth.extract::<bool>()?;
+    let algorithm: &str = algo.extract::<&PyString>()?.to_str()?;
+
+    let shape = stack.shape();  // (energy, z, y, x)
+    let nz = shape[1];
+    let ny = shape[2];
+    let nx = shape[3];
+
+    let final_result = py.allow_threads(|| {
+        // Parallelize over z*y combinations
+        let result: Vec<_> = (0..nz * ny)
+            .into_par_iter()
+            .map(|idx| {
+                let iz = idx / ny;
+                let iy = idx % ny;
+                let mut local_result = Array::zeros((nz, ny, nx));
+
+                for ix in 0..nx {
+                    // Skip if masked
+                    if mask[[iz, iy, ix]] == 0 {
+                        local_result[[iz, iy, ix]] = NAN;
+                        continue;
+                    }
+
+                    let mut slice = stack.slice(s![.., iz, iy, ix]).to_vec();
+
+                    // smoothing
+                    if smooth {
+                        if algorithm == "savgol" {
+                            let input = SavGolInput {
+                                data: &slice,
+                                window_length: smooth_width,
+                                poly_order: smooth_order,
+                                derivative: 0,
+                            };
+                            slice = savgol_filter(&input).unwrap();
+                        } else if algorithm == "median" {
+                            slice = medfilt(slice, smooth_width, "zeropadding");
+                        } else if algorithm == "3point" {
+                            slice = multi_3point_average(&slice, smooth_width);
+                        } else if algorithm == "boxcar" {
+                            slice = boxcar(&slice, smooth_width);
+                        }
+                    }
+
+                    let sub_slice = &slice[start_idx..stop_idx];
+                    let (relative_max_idx, _max_value) = sub_slice
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                        .unwrap();
+
+                    // to ndarray
+                    let slice = Array::from(slice);
+                    let half_points = num_points / 2;
+
+                    let max_idx = relative_max_idx + start_idx;
+
+                    let mut fit_start_idx = 0;
+                    if max_idx > half_points {
+                        fit_start_idx = max_idx - half_points;
+                    }
+
+                    let mut fit_end_idx = max_idx + half_points + 1;
+                    if fit_end_idx > slice.len() - 1 {
+                        fit_end_idx = slice.len() - 1;
+                    }
+
+                    // initial_guessing (ax^2 + bx + c)
+                    let c = slice[fit_start_idx];
+                    let b = (slice[fit_end_idx] - slice[fit_start_idx])
+                            / (nrj[fit_end_idx] - nrj[fit_start_idx]);
+                    let mut a = -b / (2.0 * nrj[max_idx]);
+                    if a > 0.0 {
+                        a = -a;
+                    }
+
+                    let initial_guess = vec![a, b, c];
+                    let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+                    let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+
+                    local_result[[iz, iy, ix]] = quadratic_fit_center(xdata, ydata, initial_guess);
+                }
+                local_result
+            })
+            .collect();
+
+        result
+            .iter()
+            .fold(Array::zeros((nz, ny, nx)), |acc, arr| acc + arr)
+    });
+
+    let py_result = PyArray3::from_array(py, &final_result);
+    Ok(py_result.to_owned())
+}
+
+#[pyfunction]
+fn gaussianfit_mc_3d(
+    py: Python,
+    energy: &PyArray1<f64>,
+    volume: &PyArray4<f64>,  // (energy, z, y, x)
+    points: &PyInt,
+    mask: &PyArray3<u8>,     // (z, y, x)
+    start_e: &PyFloat,
+    stop_e: &PyFloat,
+    smooth: &PyBool,
+    algo: &PyString,
+    smooth_width: &PyInt,
+    smooth_order: &PyInt,
+) -> PyResult<Py<PyArray3<f64>>> {
+    let nrj = unsafe { energy.as_array() };
+    let start_e = start_e.value();
+    let stop_e = stop_e.value();
+    let smooth_width: usize = smooth_width.extract::<usize>()?;
+    let smooth_order: usize = smooth_order.extract::<usize>()?;
+
+    let start_idx = nrj.iter().position(|&x| x >= start_e).unwrap();
+    let stop_idx = nrj.iter().position(|&x| x >= stop_e).unwrap();
+
+    let (nrjmin, nrjmax) = nrj.to_vec()[start_idx..stop_idx]
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &val| {
+            (min.min(val), max.max(val))
+        });
+
+    let stack = unsafe { volume.as_array() };
+    let mask = unsafe { mask.as_array() };
+    let num_points = points.extract::<usize>()?;
+    let smooth = smooth.extract::<bool>()?;
+    let algorithm: &str = algo.extract::<&PyString>()?.to_str()?;
+
+    let shape = stack.shape();  // (energy, z, y, x)
+    let nz = shape[1];
+    let ny = shape[2];
+    let nx = shape[3];
+
+    let final_result = py.allow_threads(|| {
+        let result: Vec<_> = (0..nz * ny)
+            .into_par_iter()
+            .map(|idx| {
+                let iz = idx / ny;
+                let iy = idx % ny;
+                let mut local_result = Array::zeros((nz, ny, nx));
+
+                for ix in 0..nx {
+                    if mask[[iz, iy, ix]] == 0 {
+                        local_result[[iz, iy, ix]] = NAN;
+                        continue;
+                    }
+
+                    let mut slice = stack.slice(s![.., iz, iy, ix]).to_vec();
+
+                    // smoothing
+                    if smooth {
+                        if algorithm == "savgol" {
+                            let input = SavGolInput {
+                                data: &slice,
+                                window_length: smooth_width,
+                                poly_order: smooth_order,
+                                derivative: 0,
+                            };
+                            slice = savgol_filter(&input).unwrap();
+                        } else if algorithm == "medfilt" {
+                            slice = medfilt(slice, smooth_width, "zeropadding");
+                        } else if algorithm == "3point" {
+                            slice = multi_3point_average(&slice, smooth_width);
+                        } else if algorithm == "boxcar" {
+                            slice = boxcar(&slice, smooth_width);
+                        }
+                    }
+
+                    let sub_slice = &slice[start_idx..stop_idx];
+                    let (relative_max_idx, _) = &sub_slice
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                        .unwrap();
+
+                    let (relative_min_idx, _) = &sub_slice
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                        .unwrap();
+
+                    let max_idx = relative_max_idx + start_idx;
+                    let min_idx = relative_min_idx + start_idx;
+
+                    // initial_guessing (a*exp(-(x-b)^2/(2*c^2))
+                    let maxy = slice[max_idx];
+                    let miny = slice[min_idx];
+                    let maxx = nrjmax;
+                    let minx = nrjmin;
+                    let cen = nrj[max_idx];
+                    let height = (maxy - miny) * 3.0;
+                    let sig = (maxx - minx) / 6.0;
+                    let amp = height * sig;
+
+                    let slice = Array::from(slice);
+                    let half_points = num_points / 2;
+
+                    let mut fit_start_idx = 0;
+                    if max_idx > half_points {
+                        fit_start_idx = max_idx - half_points;
+                    }
+
+                    let mut fit_end_idx = max_idx + half_points + 1;
+                    if fit_end_idx > slice.len() - 1 {
+                        fit_end_idx = slice.len() - 1;
+                    }
+
+                    let initial_guess = vec![amp, cen, sig, miny];
+                    let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+                    let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+
+                    local_result[[iz, iy, ix]] = gaussian_fit_center(xdata, ydata, initial_guess);
+                }
+                local_result
+            })
+            .collect();
+
+        result
+            .iter()
+            .fold(Array::zeros((nz, ny, nx)), |acc, arr| acc + arr)
+    });
+
+    let py_result = PyArray3::from_array(py, &final_result);
     Ok(py_result.to_owned())
 }
 
@@ -524,6 +783,8 @@ fn create_mask_rs(py: Python, image_width: usize, image_height: usize, rois: Vec
 fn txm_pal_core(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadfit_mc, m)?)?;
     m.add_function(wrap_pyfunction!(gaussianfit_mc, m)?)?;
+    m.add_function(wrap_pyfunction!(quadfit_mc_3d, m)?)?;
+    m.add_function(wrap_pyfunction!(gaussianfit_mc_3d, m)?)?;
     m.add_function(wrap_pyfunction!(quadfit_single, m)?)?;
     m.add_function(wrap_pyfunction!(phase_cross_correlation_rs, m)?)?;
     m.add_function(wrap_pyfunction!(phase_cross_correlation_stack, m)?)?;

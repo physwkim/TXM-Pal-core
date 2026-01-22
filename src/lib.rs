@@ -159,7 +159,7 @@ fn quadfit_mc_3d(
     smooth_width: &PyInt,
     smooth_order: &PyInt,
 ) -> PyResult<Py<PyArray3<f64>>> {
-    let nrj = unsafe { energy.as_array() };
+    let nrj = unsafe { energy.as_array() }.to_owned();  // Clone to owned array
     let start_e = start_e.value();
     let stop_e = stop_e.value();
 
@@ -169,11 +169,11 @@ fn quadfit_mc_3d(
     let start_idx = nrj.iter().position(|&x| x >= start_e).unwrap();
     let stop_idx = nrj.iter().position(|&x| x >= stop_e).unwrap();
 
-    let stack = unsafe { volume.as_array() };
+    let stack = unsafe { volume.as_array() }.to_owned();  // Clone to owned array
     let num_points = points.extract::<usize>()?;
-    let mask = unsafe { mask.as_array() };
+    let mask = unsafe { mask.as_array() }.to_owned();  // Clone to owned array
     let smooth = smooth.extract::<bool>()?;
-    let algorithm: &str = algo.extract::<&PyString>()?.to_str()?;
+    let algorithm: String = algo.extract::<&PyString>()?.to_str()?.to_string();  // Owned String
 
     let shape = stack.shape();  // (energy, z, y, x)
     let nz = shape[1];
@@ -181,88 +181,91 @@ fn quadfit_mc_3d(
     let nx = shape[3];
 
     let final_result = py.allow_threads(|| {
-        // Parallelize over z*y combinations
-        let result: Vec<_> = (0..nz * ny)
+        // Parallelize over z slices (like 2D version)
+        let result: Vec<_> = (0..nz)
             .into_par_iter()
-            .map(|idx| {
-                let iz = idx / ny;
-                let iy = idx % ny;
-                let mut local_result = Array::zeros((nz, ny, nx));
+            .map(|iz| {
+                let mut local_result = Array::zeros((ny, nx));  // Only one z-slice
 
-                for ix in 0..nx {
-                    // Skip if masked
-                    if mask[[iz, iy, ix]] == 0 {
-                        local_result[[iz, iy, ix]] = NAN;
-                        continue;
-                    }
-
-                    let mut slice = stack.slice(s![.., iz, iy, ix]).to_vec();
-
-                    // smoothing
-                    if smooth {
-                        if algorithm == "savgol" {
-                            let input = SavGolInput {
-                                data: &slice,
-                                window_length: smooth_width,
-                                poly_order: smooth_order,
-                                derivative: 0,
-                            };
-                            slice = savgol_filter(&input).unwrap();
-                        } else if algorithm == "median" {
-                            slice = medfilt(slice, smooth_width, "zeropadding");
-                        } else if algorithm == "3point" {
-                            slice = multi_3point_average(&slice, smooth_width);
-                        } else if algorithm == "boxcar" {
-                            slice = boxcar(&slice, smooth_width);
+                for iy in 0..ny {
+                    for ix in 0..nx {
+                        // Skip if masked
+                        if mask[[iz, iy, ix]] == 0 {
+                            local_result[[iy, ix]] = NAN;
+                            continue;
                         }
+
+                        let mut slice = stack.slice(s![.., iz, iy, ix]).to_vec();
+
+                        // smoothing
+                        if smooth {
+                            if algorithm == "savgol" {
+                                let input = SavGolInput {
+                                    data: &slice,
+                                    window_length: smooth_width,
+                                    poly_order: smooth_order,
+                                    derivative: 0,
+                                };
+                                slice = savgol_filter(&input).unwrap();
+                            } else if algorithm == "median" {
+                                slice = medfilt(slice, smooth_width, "zeropadding");
+                            } else if algorithm == "3point" {
+                                slice = multi_3point_average(&slice, smooth_width);
+                            } else if algorithm == "boxcar" {
+                                slice = boxcar(&slice, smooth_width);
+                            }
+                        }
+
+                        let sub_slice = &slice[start_idx..stop_idx];
+                        let (relative_max_idx, _max_value) = sub_slice
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                            .unwrap();
+
+                        // to ndarray
+                        let slice = Array::from(slice);
+                        let half_points = num_points / 2;
+
+                        let max_idx = relative_max_idx + start_idx;
+
+                        let mut fit_start_idx = 0;
+                        if max_idx > half_points {
+                            fit_start_idx = max_idx - half_points;
+                        }
+
+                        let mut fit_end_idx = max_idx + half_points + 1;
+                        if fit_end_idx > slice.len() - 1 {
+                            fit_end_idx = slice.len() - 1;
+                        }
+
+                        // initial_guessing (ax^2 + bx + c)
+                        let c = slice[fit_start_idx];
+                        let b = (slice[fit_end_idx] - slice[fit_start_idx])
+                                / (nrj[fit_end_idx] - nrj[fit_start_idx]);
+                        let mut a = -b / (2.0 * nrj[max_idx]);
+                        if a > 0.0 {
+                            a = -a;
+                        }
+
+                        let initial_guess = vec![a, b, c];
+                        let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+                        let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+
+                        local_result[[iy, ix]] = quadratic_fit_center(xdata, ydata, initial_guess);
                     }
-
-                    let sub_slice = &slice[start_idx..stop_idx];
-                    let (relative_max_idx, _max_value) = sub_slice
-                        .iter()
-                        .cloned()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                        .unwrap();
-
-                    // to ndarray
-                    let slice = Array::from(slice);
-                    let half_points = num_points / 2;
-
-                    let max_idx = relative_max_idx + start_idx;
-
-                    let mut fit_start_idx = 0;
-                    if max_idx > half_points {
-                        fit_start_idx = max_idx - half_points;
-                    }
-
-                    let mut fit_end_idx = max_idx + half_points + 1;
-                    if fit_end_idx > slice.len() - 1 {
-                        fit_end_idx = slice.len() - 1;
-                    }
-
-                    // initial_guessing (ax^2 + bx + c)
-                    let c = slice[fit_start_idx];
-                    let b = (slice[fit_end_idx] - slice[fit_start_idx])
-                            / (nrj[fit_end_idx] - nrj[fit_start_idx]);
-                    let mut a = -b / (2.0 * nrj[max_idx]);
-                    if a > 0.0 {
-                        a = -a;
-                    }
-
-                    let initial_guess = vec![a, b, c];
-                    let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
-                    let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
-
-                    local_result[[iz, iy, ix]] = quadratic_fit_center(xdata, ydata, initial_guess);
                 }
                 local_result
             })
             .collect();
 
-        result
-            .iter()
-            .fold(Array::zeros((nz, ny, nx)), |acc, arr| acc + arr)
+        // Stack z-slices into 3D array
+        let mut final_arr = Array::zeros((nz, ny, nx));
+        for (iz, slice_result) in result.into_iter().enumerate() {
+            final_arr.slice_mut(s![iz, .., ..]).assign(&slice_result);
+        }
+        final_arr
     });
 
     let py_result = PyArray3::from_array(py, &final_result);
@@ -283,7 +286,7 @@ fn gaussianfit_mc_3d(
     smooth_width: &PyInt,
     smooth_order: &PyInt,
 ) -> PyResult<Py<PyArray3<f64>>> {
-    let nrj = unsafe { energy.as_array() };
+    let nrj = unsafe { energy.as_array() }.to_owned();  // Clone to owned array
     let start_e = start_e.value();
     let stop_e = stop_e.value();
     let smooth_width: usize = smooth_width.extract::<usize>()?;
@@ -298,11 +301,11 @@ fn gaussianfit_mc_3d(
             (min.min(val), max.max(val))
         });
 
-    let stack = unsafe { volume.as_array() };
-    let mask = unsafe { mask.as_array() };
+    let stack = unsafe { volume.as_array() }.to_owned();  // Clone to owned array
+    let mask = unsafe { mask.as_array() }.to_owned();  // Clone to owned array
     let num_points = points.extract::<usize>()?;
     let smooth = smooth.extract::<bool>()?;
-    let algorithm: &str = algo.extract::<&PyString>()?.to_str()?;
+    let algorithm: String = algo.extract::<&PyString>()?.to_str()?.to_string();  // Owned String
 
     let shape = stack.shape();  // (energy, z, y, x)
     let nz = shape[1];
@@ -310,94 +313,98 @@ fn gaussianfit_mc_3d(
     let nx = shape[3];
 
     let final_result = py.allow_threads(|| {
-        let result: Vec<_> = (0..nz * ny)
+        // Parallelize over z slices (like 2D version)
+        let result: Vec<_> = (0..nz)
             .into_par_iter()
-            .map(|idx| {
-                let iz = idx / ny;
-                let iy = idx % ny;
-                let mut local_result = Array::zeros((nz, ny, nx));
+            .map(|iz| {
+                let mut local_result = Array::zeros((ny, nx));  // Only one z-slice
 
-                for ix in 0..nx {
-                    if mask[[iz, iy, ix]] == 0 {
-                        local_result[[iz, iy, ix]] = NAN;
-                        continue;
-                    }
-
-                    let mut slice = stack.slice(s![.., iz, iy, ix]).to_vec();
-
-                    // smoothing
-                    if smooth {
-                        if algorithm == "savgol" {
-                            let input = SavGolInput {
-                                data: &slice,
-                                window_length: smooth_width,
-                                poly_order: smooth_order,
-                                derivative: 0,
-                            };
-                            slice = savgol_filter(&input).unwrap();
-                        } else if algorithm == "medfilt" {
-                            slice = medfilt(slice, smooth_width, "zeropadding");
-                        } else if algorithm == "3point" {
-                            slice = multi_3point_average(&slice, smooth_width);
-                        } else if algorithm == "boxcar" {
-                            slice = boxcar(&slice, smooth_width);
+                for iy in 0..ny {
+                    for ix in 0..nx {
+                        if mask[[iz, iy, ix]] == 0 {
+                            local_result[[iy, ix]] = NAN;
+                            continue;
                         }
+
+                        let mut slice = stack.slice(s![.., iz, iy, ix]).to_vec();
+
+                        // smoothing
+                        if smooth {
+                            if algorithm == "savgol" {
+                                let input = SavGolInput {
+                                    data: &slice,
+                                    window_length: smooth_width,
+                                    poly_order: smooth_order,
+                                    derivative: 0,
+                                };
+                                slice = savgol_filter(&input).unwrap();
+                            } else if algorithm == "medfilt" {
+                                slice = medfilt(slice, smooth_width, "zeropadding");
+                            } else if algorithm == "3point" {
+                                slice = multi_3point_average(&slice, smooth_width);
+                            } else if algorithm == "boxcar" {
+                                slice = boxcar(&slice, smooth_width);
+                            }
+                        }
+
+                        let sub_slice = &slice[start_idx..stop_idx];
+                        let (relative_max_idx, _) = sub_slice
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                            .unwrap();
+
+                        let (relative_min_idx, _) = sub_slice
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                            .unwrap();
+
+                        let max_idx = relative_max_idx + start_idx;
+                        let min_idx = relative_min_idx + start_idx;
+
+                        // initial_guessing (a*exp(-(x-b)^2/(2*c^2))
+                        let maxy = slice[max_idx];
+                        let miny = slice[min_idx];
+                        let maxx = nrjmax;
+                        let minx = nrjmin;
+                        let cen = nrj[max_idx];
+                        let height = (maxy - miny) * 3.0;
+                        let sig = (maxx - minx) / 6.0;
+                        let amp = height * sig;
+
+                        let slice = Array::from(slice);
+                        let half_points = num_points / 2;
+
+                        let mut fit_start_idx = 0;
+                        if max_idx > half_points {
+                            fit_start_idx = max_idx - half_points;
+                        }
+
+                        let mut fit_end_idx = max_idx + half_points + 1;
+                        if fit_end_idx > slice.len() - 1 {
+                            fit_end_idx = slice.len() - 1;
+                        }
+
+                        let initial_guess = vec![amp, cen, sig, miny];
+                        let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+                        let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
+
+                        local_result[[iy, ix]] = gaussian_fit_center(xdata, ydata, initial_guess);
                     }
-
-                    let sub_slice = &slice[start_idx..stop_idx];
-                    let (relative_max_idx, _) = &sub_slice
-                        .iter()
-                        .cloned()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                        .unwrap();
-
-                    let (relative_min_idx, _) = &sub_slice
-                        .iter()
-                        .cloned()
-                        .enumerate()
-                        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                        .unwrap();
-
-                    let max_idx = relative_max_idx + start_idx;
-                    let min_idx = relative_min_idx + start_idx;
-
-                    // initial_guessing (a*exp(-(x-b)^2/(2*c^2))
-                    let maxy = slice[max_idx];
-                    let miny = slice[min_idx];
-                    let maxx = nrjmax;
-                    let minx = nrjmin;
-                    let cen = nrj[max_idx];
-                    let height = (maxy - miny) * 3.0;
-                    let sig = (maxx - minx) / 6.0;
-                    let amp = height * sig;
-
-                    let slice = Array::from(slice);
-                    let half_points = num_points / 2;
-
-                    let mut fit_start_idx = 0;
-                    if max_idx > half_points {
-                        fit_start_idx = max_idx - half_points;
-                    }
-
-                    let mut fit_end_idx = max_idx + half_points + 1;
-                    if fit_end_idx > slice.len() - 1 {
-                        fit_end_idx = slice.len() - 1;
-                    }
-
-                    let initial_guess = vec![amp, cen, sig, miny];
-                    let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
-                    let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
-
-                    local_result[[iz, iy, ix]] = gaussian_fit_center(xdata, ydata, initial_guess);
                 }
                 local_result
             })
             .collect();
 
-        result
-            .iter()
-            .fold(Array::zeros((nz, ny, nx)), |acc, arr| acc + arr)
+        // Stack z-slices into 3D array
+        let mut final_arr = Array::zeros((nz, ny, nx));
+        for (iz, slice_result) in result.into_iter().enumerate() {
+            final_arr.slice_mut(s![iz, .., ..]).assign(&slice_result);
+        }
+        final_arr
     });
 
     let py_result = PyArray3::from_array(py, &final_result);

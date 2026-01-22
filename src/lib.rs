@@ -253,7 +253,14 @@ fn quadfit_mc_3d(
                         let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
                         let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
 
-                        local_result[[iy, ix]] = quadratic_fit_center(xdata, ydata, initial_guess);
+                        let fitted_center = quadratic_fit_center(xdata, ydata, initial_guess);
+
+                        // Validate result is within energy range
+                        if fitted_center >= start_e && fitted_center <= stop_e {
+                            local_result[[iy, ix]] = fitted_center;
+                        } else {
+                            local_result[[iy, ix]] = NAN;
+                        }
                     }
                 }
                 local_result
@@ -392,7 +399,14 @@ fn gaussianfit_mc_3d(
                         let xdata = nrj.slice(s![fit_start_idx..fit_end_idx]).to_vec();
                         let ydata = slice.slice(s![fit_start_idx..fit_end_idx]).to_vec();
 
-                        local_result[[iy, ix]] = gaussian_fit_center(xdata, ydata, initial_guess);
+                        let fitted_center = gaussian_fit_center(xdata, ydata, initial_guess);
+
+                        // Validate result is within energy range
+                        if fitted_center >= start_e && fitted_center <= stop_e {
+                            local_result[[iy, ix]] = fitted_center;
+                        } else {
+                            local_result[[iy, ix]] = NAN;
+                        }
                     }
                 }
                 local_result
